@@ -1,0 +1,3 @@
+# pySerial 3.5 is already included in vendor/ for this package.
+# This requirements file is for rebuilding the environment if desired.
+pyserial==3.5
