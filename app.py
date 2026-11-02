@@ -12,8 +12,7 @@ import sqlite3
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from http.server import ThreadingHTTPServer
 import uuid
 import webbrowser
 
@@ -78,13 +77,21 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, created TEXT, source TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS packets (id INTEGER PRIMARY KEY, session TEXT, body TEXT)")
         self.db.execute("CREATE INDEX IF NOT EXISTS packets_session ON packets(session,id)")
+        existing = {r[1] for r in self.db.execute("PRAGMA table_info(sessions)")}
+        if "owner" not in existing:
+            self.db.execute("ALTER TABLE sessions ADD COLUMN owner TEXT")
+            self.db.execute("ALTER TABLE sessions ADD COLUMN shared INTEGER NOT NULL DEFAULT 0")
+        self.db.execute("CREATE TABLE IF NOT EXISTS raw_lines (id INTEGER PRIMARY KEY, session TEXT, received_at TEXT, line TEXT)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS raw_session ON raw_lines(session,id)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS feed_batches (session TEXT, batch TEXT, PRIMARY KEY(session,batch))")
         self.db.commit()
         self.tracks = {}
 
-    def create_session(self, source):
+    def create_session(self, source, owner=None, shared=True):
         sid = uuid.uuid4().hex
         with self.lock:
-            self.db.execute("INSERT INTO sessions VALUES (?,?,?)", (sid, datetime.now(timezone.utc).isoformat(), source))
+            self.db.execute("INSERT INTO sessions(id,created,source,owner,shared) VALUES (?,?,?,?,?)", (sid, datetime.now(timezone.utc).isoformat(), source, owner, int(shared)))
             self.db.commit()
         return sid
 
@@ -102,7 +109,25 @@ class Store:
         p["duplicate"] = False
         with self.lock:
             key = (sid, p["sender"])
-            track = self.tracks.setdefault(key, {"boot": 0, "uptime": None, "seen": set(), "alt": None})
+            track = self.tracks.get(key)
+            if track is None:
+                # Reconstruct the calculation baseline after a server restart.
+                track = {"boot": 0, "uptime": None, "seen": set(), "alt": None, "position": None}
+                rows = self.db.execute("SELECT body FROM packets WHERE session=? ORDER BY id", (sid,))
+                for (body,) in rows:
+                    old = json.loads(body)
+                    if old["sender"] != p["sender"] or old["duplicate"]:
+                        continue
+                    if old["boot"] != track["boot"]:
+                        track.update(boot=old["boot"], seen=set(), alt=None, position=None)
+                    track["seen"].add((old["packet_seq"], old["uptime_ms"]))
+                    track["uptime"] = old["uptime_ms"]
+                    if old["has_position"]:
+                        track["position"] = (old["uptime_ms"], old["latitude_deg"], old["longitude_deg"])
+                        if old["altitude_m"] is not None:
+                            track["alt"] = (old["uptime_ms"], old["altitude_m"])
+                self.tracks[key] = track
+            p["ground_speed_mps"] = None
             identity = (p["packet_seq"], p["uptime_ms"])
             if identity in track["seen"]:
                 p["duplicate"] = True
@@ -111,9 +136,20 @@ class Store:
                     # A reset/wrap/out-of-order sample must not produce an ascent spike.
                     track["boot"] += 1
                     track["alt"] = None
+                    track["position"] = None
                     track["seen"].clear()
                 track["seen"].add(identity)
                 track["uptime"] = p["uptime_ms"]
+                if p["has_position"]:
+                    previous = track["position"]
+                    if previous and p["uptime_ms"] > previous[0]:
+                        lat1, lat2 = map(math.radians, (previous[1], p["latitude_deg"]))
+                        dlat = lat2 - lat1
+                        dlon = math.radians(p["longitude_deg"] - previous[2])
+                        a = math.sin(dlat / 2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon / 2)**2
+                        distance = 6371008.8 * 2 * math.asin(math.sqrt(min(1.0, max(0.0, a))))
+                        p["ground_speed_mps"] = distance / ((p["uptime_ms"] - previous[0]) / 1000)
+                    track["position"] = (p["uptime_ms"], p["latitude_deg"], p["longitude_deg"])
                 if p["has_position"] and p["altitude_m"] is not None:
                     previous = track["alt"]
                     if previous and p["uptime_ms"] > previous[0]:
@@ -131,7 +167,7 @@ class Store:
             rows = self.db.execute("SELECT id,body FROM packets WHERE session=? AND id>? ORDER BY id LIMIT ?", (sid, after, limit)).fetchall()
         return [dict(json.loads(body), id=i) for i, body in rows]
 
-    def import_csv(self, text, name):
+    def import_csv(self, text, name, owner=None, shared=True):
         # Validate the whole upload before creating a session; no partial imports.
         lines = [line for line in text.lstrip("\ufeff").splitlines() if line.strip() and not line.lstrip().startswith("#")]
         if not lines:
@@ -182,7 +218,7 @@ class Store:
         sid = uuid.uuid4().hex
         filename = str(name).replace("\\", "/").split("/")[-1][:100] or "flight.csv"
         with self.lock, self.db:
-            self.db.execute("INSERT INTO sessions VALUES (?,?,?)", (sid, datetime.now(timezone.utc).isoformat(), "CSV · " + filename))
+            self.db.execute("INSERT INTO sessions(id,created,source,owner,shared) VALUES (?,?,?,?,?)", (sid, datetime.now(timezone.utc).isoformat(), "CSV · " + filename, owner, int(shared)))
             for line, stamp, kind, offset in validated:
                 stamp = stamp or datetime.fromtimestamp(base + offset, timezone.utc).isoformat()
                 self.add(sid, line, stamp, time_kind=kind, commit=False)
@@ -290,107 +326,16 @@ class Receiver:
                 return
 
 
-def make_handler(store, receiver):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_):
-            pass
-
-        def reply(self, data, content_type="application/json", status=200, extra=None):
-            body = json.dumps(data, allow_nan=False).encode() if content_type == "application/json" else data
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            if extra:
-                for key, value in extra.items():
-                    self.send_header(key, value)
-            self.end_headers()
-            try:
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-
-        def do_GET(self):
-            if not self.local_host():
-                self.reply({"error": "Local host required"}, status=403)
-                return
-            parsed = urlparse(self.path)
-            query = parse_qs(parsed.query)
-            try:
-                if parsed.path == "/api/state":
-                    self.reply({**receiver.snapshot(), "sessions": store.sessions(), "serial_available": SERIAL_OK})
-                elif parsed.path == "/api/ports":
-                    self.reply([{"device": p.device, "description": p.description} for p in list_ports.comports()] if SERIAL_OK else [])
-                elif parsed.path == "/api/packets":
-                    after = max(0, int(query.get("after", [0])[0]))
-                    self.reply(store.packets(query.get("session", [""])[0], after))
-                elif parsed.path == "/api/export":
-                    sid = query.get("session", [""])[0]
-                    output = io.StringIO(newline="")
-                    fields = ["received_at", *COLUMNS, "ascent_mps", "boot", "duplicate", "time_kind"]
-                    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
-                    writer.writeheader()
-                    after = 0
-                    while batch := store.packets(sid, after):
-                        writer.writerows(batch)
-                        after = batch[-1]["id"]
-                    self.reply(output.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="chippy-received.csv"'})
-                else:
-                    files = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "application/javascript"), "/style.css": ("style.css", "text/css"), "/vendor/leaflet.js": ("vendor/leaflet.js", "application/javascript"), "/vendor/leaflet.css": ("vendor/leaflet.css", "text/css")}
-                    if parsed.path not in files:
-                        self.reply({"error": "Not found"}, status=404)
-                        return
-                    name, mime = files[parsed.path]
-                    self.reply((ROOT / "static" / name).read_bytes(), mime)
-            except (ValueError, KeyError) as exc:
-                self.reply({"error": str(exc)}, status=400)
-
-        def do_POST(self):
-            if not self.local_host():
-                self.reply({"error": "Local host required"}, status=403)
-                return
-            # Browser requests must originate from this same loopback app.
-            expected = f"http://127.0.0.1:{self.server.server_port}"
-            if self.headers.get("Origin") not in (None, expected, expected.replace("127.0.0.1", "localhost")):
-                self.reply({"error": "Origin not allowed"}, status=403)
-                return
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                maximum = 10 * 1024 * 1024 if self.path == "/api/import" else 2048
-                if not 0 <= length <= maximum:
-                    raise ValueError("Request too large")
-                body = json.loads(self.rfile.read(length) or b"{}")
-                if not isinstance(body, dict):
-                    raise ValueError("Expected a JSON object")
-                if self.path == "/api/import":
-                    if not isinstance(body.get("csv"), str):
-                        raise ValueError("Choose a CSV file first.")
-                    sid, count = store.import_csv(body["csv"], body.get("name", "flight.csv"))
-                    self.reply({"session": sid, "count": count})
-                elif self.path == "/api/connect":
-                    mode = body.get("mode")
-                    if mode not in ("serial", "demo"):
-                        raise ValueError("Invalid mode")
-                    sid = receiver.start(mode, body.get("port"))
-                    self.reply({"session": sid})
-                elif self.path == "/api/disconnect":
-                    with receiver.control:
-                        receiver.stop()
-                    self.reply({"ok": True})
-                else:
-                    self.reply({"error": "Not found"}, status=404)
-            except (ValueError, RuntimeError, TypeError) as exc:
-                self.reply({"error": str(exc)}, status=400)
-
-        def local_host(self):
-            return self.headers.get("Host") in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}")
-    return Handler
+def make_handler(store, receiver, public_url=None):
+    from web_server import handler_for
+    return handler_for(store, receiver, ROOT, COLUMNS, public_url)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765, help="Website port (not the Arduino COM port)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address; use 0.0.0.0 for LAN access")
+    parser.add_argument("--public-url", default=None, help="Website origin, for example https://chippy.example.com")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--demo", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
@@ -398,12 +343,12 @@ def main():
     store = Store(args.data_dir / "chippy.sqlite3")
     receiver = Receiver(store)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store, receiver))
+        server = ThreadingHTTPServer((args.host, args.port), make_handler(store, receiver, args.public_url))
     except OSError as exc:
         raise SystemExit(f"Could not start dashboard: {exc}. Try --port 8766")
     if args.demo:
-        receiver.start("demo")
-    url = f"http://127.0.0.1:{server.server_port}"
+        print("Use User Input → Try demo in the browser for a private demonstration.")
+    url = args.public_url or f"http://127.0.0.1:{server.server_port}"
     print(f"CHIPPY dashboard: {url}\nSaved packets: {args.data_dir.resolve()}\nClose Arduino Serial Monitor before connecting. Ctrl+C stops the app.", flush=True)
     if not args.no_browser:
         webbrowser.open(url)

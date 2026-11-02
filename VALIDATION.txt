@@ -1,30 +1,32 @@
-Validation — 2026-10-28
+CHIPPY airspace/geofence/KML update — 2026-11-02
 
-Passed 12 automated tests using the installed Python 3.11:
-- Exact Uno receiver format and status/header filtering.
-- Missing GPS position/time fields.
-- Ascent based on sample time despite receipt delays and missed transmissions.
-- Duplicate/restart protection.
-- Malformed/non-finite coordinate rejection.
-- Persistent and isolated real/demo sessions.
-- HTTP packet retrieval, CSV export and local-origin protection.
-- pySerial loopback with a packet split across serial read timeouts.
-- SD CSV import, ascent recalculation, and explicitly estimated replay times.
-- Receiver-export CSV import preserving original reception timestamps.
-- Rejection of invalid CSV files without creating partial sessions.
-- Older 10-column SD CSV format without UTC columns.
+35 automated Python tests passed. JavaScript geometry checks passed.
+JavaScript syntax checks passed for app.js, globe.js, mission.js, and geo.js.
+Git whitespace checks passed (line-ending normalization warnings only).
 
-JavaScript passed Node syntax checking.
-Browser checked: initial view, synthetic packet capture, OpenStreetMap loading,
-path markers, selecting packet #0 and #1, measurement popup/inspector, path fitting,
-and disconnect retaining packet history. The dashboard adapts to a narrow window.
-CSV browser checks: chose and uploaded the included 30-row example flight, played
-the replay, and showed the full 30-position path with expected 4.20 m/s ascent.
+New checks: latitude/longitude-aligned rectangular fences; invalid/degenerate/
+dateline fences; KML point/line/polygon/multigeometry/holes; rejected entities,
+network links, unsupported formats, invalid coordinates and oversized files;
+atomic map-config saves; persistent private/shared overlay isolation; admin-only
+shared publishing and clearing; FAA response cache/failure/stale behavior; MSL
+altitude conversion without fabricating AGL/unknown heights; boundary distance,
+inside/near/outside status, edge cases, stale/missing GPS, replay and duplicates.
+The existing serial, CSV, password, multi-viewer and uploader tests also pass.
 
-pySerial 3.5 is bundled from its official PyPI wheel; SHA-256 verified against
-PyPI package metadata. Leaflet 1.9.4 is included locally with its license.
+Live FAA source checks succeeded for controlled B/C/D, SUA, and TFR geometry near
+Maryland/DC. The TFR geometry feed supplies no vertical limits; TFRs are footprints.
 
-No Arduino was attached. Physical serial reception and over-the-air telemetry
-still need the user's bench verification. Map background requires internet.
-Replay controls additionally checked in the browser: Restart returns to 1/30,
-the packet slider seeks to 30/30, and the uploaded flight remains separate from live capture.
+Browser checks: entered and saved a private four-corner fence; uploaded a real
+synthetic KML through the file picker; displayed point/polygon overlays; switched
+shared/private sources; loaded FAA overlays; independently toggled layers; viewed
+3D altitude curtains and a near-boundary warning on a synthetic flight reaching
+30,480 m / 100,000 ft. No browser console errors were reported during these checks.
+
+The 2D basemap now uses Esri World Street Map after the previous provider returned
+blocked tiles. 3D uses Cesium with Esri satellite imagery and ellipsoid heights.
+Reference data completeness, vertical reference and effective times must be
+checked using the FAA source details; the map is not a flight authorization.
+
+No cutdown command or onboard configuration changes were implemented. Choppies
+handles cutdown onboard, as requested. Actual hardware and the future hosted
+server still need field/deployment testing. No GitHub push or deployment occurred.
