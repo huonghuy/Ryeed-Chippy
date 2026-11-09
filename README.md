@@ -28,8 +28,13 @@ CHIPPY_INITIAL_PASSWORD=paste-a-long-random-password-here
   it out to use the site at http://localhost:8765 only.
 - **CHIPPY_INITIAL_PASSWORD** is the admin password. `openssl rand -hex 24` makes a
   good one. It is read only when the database is first created, and leaving it out
-  means the password is **bpp**. After that, use **Change password**; editing `.env`
-  has no effect.
+  means the password is **bpp**. After that, use **Change password**; editing this
+  value has no effect.
+- **CHIPPY_RESET_PASSWORD** is optional, for getting back in if the password was
+  changed or lost. Add it to `.env` with a new value, run `docker compose up -d`, and
+  log in with that value. Saved flights are kept and everyone is logged out. Each
+  value works once, so leaving it in `.env` can't undo a later change on the website,
+  and the next reset needs a different value.
 
 Then run `docker compose pull && docker compose up -d`, and run the same command
 to update later. Data and the saved password live in the `chippy-data` volume and

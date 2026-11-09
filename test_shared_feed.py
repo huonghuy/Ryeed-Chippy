@@ -139,6 +139,20 @@ class SharedFeedTests(unittest.TestCase):
                 auth.login("wrong", "fresh")
         self.assertEqual(caught.exception.status, 429)
 
+    def test_reset_password_from_env_applies_once_per_value(self):
+        Access(self.store).set_password("changed-on-website")
+        def start(value):
+            with patch.dict("os.environ", {"CHIPPY_RESET_PASSWORD": value}), contextlib.redirect_stdout(io.StringIO()):
+                return Access(self.store)
+        auth = start("recovered")
+        self.assertTrue(auth.check_password("recovered"))
+        self.assertFalse(auth.check_password("changed-on-website"))
+        auth.set_password("changed-again")
+        self.assertTrue(start("recovered").check_password("changed-again"))
+        self.assertTrue(start("recovered-2").check_password("recovered-2"))
+        for invalid in ("ab", "x" * 257, ""):
+            self.assertTrue(start(invalid).check_password("recovered-2"))
+
     def test_only_the_browser_id_cookie_is_lax(self):
         request = Request(self.base + "/api/login", data=json.dumps({"password": "bpp"}).encode(), headers={"Content-Type": "application/json"})
         with self.viewer.open(request, timeout=5) as response:

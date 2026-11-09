@@ -76,8 +76,8 @@ app can hold the USB port at a time.
 - Publishing a CSV replaces the live feed with a recorded flight.
 - Set storage/proxy request limits for your host, monitor disk use, and maintain
   backups. Only logged-in admins can add data to the server.
-- There is no email recovery. Retain the password/database; recovery from a
-  forgotten password requires server administration.
+- There is no email recovery. If the password is lost or changed, set
+  CHIPPY_RESET_PASSWORD on the server and restart; see README.md.
 
 Your actual host, domain, and certificates are needed for deployment. This code
 update does not create hosting.

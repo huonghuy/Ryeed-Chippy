@@ -25,6 +25,18 @@ class Access:
         self.failures = {}
         if not self.setting("password"):
             self.set_password(os.environ.get("CHIPPY_INITIAL_PASSWORD", "bpp"))
+        self.apply_reset(os.environ.get("CHIPPY_RESET_PASSWORD"))
+
+    def apply_reset(self, value):
+        # Host-side recovery. Once per value, so leaving it in .env can't undo a later website change.
+        if not value or self.check_password(value, "password_reset"):
+            return
+        if not 3 <= len(value) <= 256:
+            print("Ignoring CHIPPY_RESET_PASSWORD: use 3 to 256 characters.", flush=True)
+            return
+        self.set_password(value)
+        self.set_setting("password_reset", self.setting("password"))
+        print("Admin password replaced from CHIPPY_RESET_PASSWORD.", flush=True)
 
     def setting(self, key):
         with self.store.lock:
@@ -40,10 +52,11 @@ class Access:
         digest = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1).hex()
         self.set_setting("password", json.dumps([salt.hex(), digest]))
 
-    def check_password(self, password):
-        if not isinstance(password, str) or len(password) > 256:
+    def check_password(self, password, key="password"):
+        stored = self.setting(key)
+        if not stored or not isinstance(password, str) or len(password) > 256:
             return False
-        salt, expected = json.loads(self.setting("password"))
+        salt, expected = json.loads(stored)
         actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
         return hmac.compare_digest(actual, expected)
 

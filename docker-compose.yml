@@ -30,6 +30,8 @@ services:
     environment:
       # Passed through only if set. First start only; otherwise the password is bpp.
       - CHIPPY_INITIAL_PASSWORD
+      # Lost access? Set a new value here and run docker compose up -d; see the README.
+      - CHIPPY_RESET_PASSWORD
 
     volumes:
       # SQLite database and saved password hash.
