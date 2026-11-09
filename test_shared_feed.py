@@ -9,12 +9,13 @@ import contextlib
 import io
 import sqlite3
 import time
-from http.server import ThreadingHTTPServer
+from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import build_opener, HTTPCookieProcessor, Request
 
 from app import Store, Receiver, make_handler, COLUMNS
-from shared_feed import Access
+from shared_feed import Access, FeedError
 from test_app import sample
 
 
@@ -101,6 +102,7 @@ class SharedFeedTests(unittest.TestCase):
         return self.request(client or self.publisher, "/api/login", {"password": password})
 
     def test_private_input_and_csv_are_hidden_from_other_viewers(self):
+        self.login()
         sid = self.request(self.publisher, "/api/input/start", {"shared": False})["session"]
         self.request(self.publisher, "/api/input/append", {"shared": False, "session": sid, "batch": "a", "lines": [sample()]})
         self.assertEqual(len(self.request(self.publisher, f"/api/packets?session={sid}")), 1)
@@ -113,8 +115,36 @@ class SharedFeedTests(unittest.TestCase):
         self.assertIsNone(self.request(self.viewer, "/api/state")["live_session"])
 
     def test_admin_required_for_all_publishing_and_password_routes(self):
-        for path, body in (("/api/input/start", {"shared": True}), ("/api/input/append", {"shared": True}), ("/api/import", {"shared": True}), ("/api/password", {"current": "bpp", "password": "new"})):
+        csv = ",".join(COLUMNS) + "\n" + sample()
+        for path, body in (("/api/input/start", {"shared": True}), ("/api/input/start", {"shared": False}), ("/api/input/start", {"shared": False, "demo": True}), ("/api/input/append", {"shared": True}), ("/api/input/append", {"shared": False}), ("/api/import", {"shared": True, "name": "x.csv", "csv": csv}), ("/api/import", {"name": "x.csv", "csv": csv}), ("/api/map-config", {"action": "clear_kml", "shared": True}), ("/api/map-config", {"action": "clear_kml"}), ("/api/password", {"current": "bpp", "password": "new"})):
             self.assert_status(401, self.viewer, path, body)
+        self.assertEqual(self.store.sessions(), [])
+
+    def test_one_visitor_cannot_lock_out_the_admin_behind_cloudflare(self):
+        visitor = {"CF-Connecting-IP": "198.51.100.7"}
+        for _ in range(5):
+            self.assert_status(401, self.viewer, "/api/login", {"password": "wrong"}, visitor)
+        self.assert_status(429, self.viewer, "/api/login", {"password": "bpp"}, visitor)
+        self.request(self.publisher, "/api/login", {"password": "bpp"}, {"CF-Connecting-IP": "192.0.2.50"})
+        self.assertTrue(self.request(self.publisher, "/api/state")["admin"])
+
+    def test_login_failures_are_capped_across_addresses(self):
+        auth = Access(self.store)
+        with patch.object(auth, "check_password", return_value=False):
+            for address in range(50):
+                with self.assertRaises(FeedError) as caught:
+                    auth.login("wrong", str(address))
+                self.assertEqual(caught.exception.status, 401)
+            with self.assertRaises(FeedError) as caught:
+                auth.login("wrong", "fresh")
+        self.assertEqual(caught.exception.status, 429)
+
+    def test_only_the_browser_id_cookie_is_lax(self):
+        request = Request(self.base + "/api/login", data=json.dumps({"password": "bpp"}).encode(), headers={"Content-Type": "application/json"})
+        with self.viewer.open(request, timeout=5) as response:
+            cookies = response.headers.get_all("Set-Cookie")
+        self.assertIn("SameSite=Lax", next(c for c in cookies if c.startswith("chippy_browser=")))
+        self.assertIn("SameSite=Strict", next(c for c in cookies if c.startswith("chippy_admin=")))
 
     def test_shared_feed_updates_both_viewers_and_retry_is_idempotent(self):
         self.login()
@@ -184,6 +214,7 @@ class SharedFeedTests(unittest.TestCase):
         self.assert_status(429, self.viewer, "/api/login", {"password": "bpp"})
 
     def test_malformed_batch_rejects_without_partial_data(self):
+        self.login()
         sid = self.request(self.publisher, "/api/input/start", {"shared": False})["session"]
         self.assert_status(400, self.publisher, "/api/input/append", {"session": sid, "batch": "x", "lines": [sample(), "bad\nline"]})
         self.assertEqual(self.request(self.publisher, f"/api/packets?session={sid}"), [])
@@ -223,6 +254,90 @@ class SharedFeedTests(unittest.TestCase):
         self.assertEqual(len(self.request(self.viewer, f"/api/packets?session={sid}")), 1)
         lines = self.request(self.viewer, f"/api/raw?session={sid}")
         self.assertEqual([line["line"] for line in lines], ["# Saved backlog", "# Ready", sample()])
+        db = sqlite3.connect(queue)
+        try:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)
+        finally:
+            db.close()
+
+    def test_uploader_stops_only_for_permission_errors_from_the_app(self):
+        from receiver_uploader import permission_ended
+
+        def error(code, kind):
+            headers = Message()
+            headers["Content-Type"] = kind
+            return HTTPError("https://x", code, "error", headers, io.BytesIO())
+
+        for code in (401, 403, 404, 409):
+            self.assertTrue(permission_ended(error(code, "application/json")))
+        for code, kind in ((403, "text/html; charset=UTF-8"), (404, "text/plain"), (502, "application/json")):
+            self.assertFalse(permission_ended(error(code, kind)))
+
+    def test_uploader_retries_through_cloudflare_403_and_truncated_response(self):
+        import receiver_uploader
+        batches = []
+
+        class Origin(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def answer(self, code, body, kind="application/json"):
+                self.send_response(code)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path != "/api/input/append":
+                    return self.answer(200, b'{"session": "s"}')
+                batches.append(body["batch"])
+                if len(batches) == 1:
+                    self.answer(403, b"error code: 1020", "text/plain")
+                elif len(batches) == 2:
+                    self.send_response(200)
+                    self.send_header("Content-Length", "99")
+                    self.end_headers()
+                    self.wfile.write(b"{")
+                else:
+                    self.answer(200, b'{"ok": true}')
+
+        class FakeSerial:
+            in_waiting = 1
+
+            def __init__(self, *_args, **_kwargs):
+                self.chunks = [(sample() + "\n").encode()]
+                self.deadline = time.monotonic() + 15
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+            def read(self, _length):
+                if self.chunks:
+                    return self.chunks.pop(0)
+                if len(batches) >= 3 or time.monotonic() > self.deadline:
+                    raise KeyboardInterrupt
+                time.sleep(.02)
+                return b""
+
+        origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
+        queue = Path(self.temp.name) / "retry.db"
+        argv = ["receiver_uploader.py", "--server", f"http://127.0.0.1:{origin.server_port}", "--port", "FAKE", "--queue", str(queue)]
+        output = io.StringIO()
+        try:
+            with patch.object(receiver_uploader.sys, "argv", argv), patch.object(receiver_uploader.getpass, "getpass", return_value="bpp"), patch.object(receiver_uploader.serial, "Serial", FakeSerial), contextlib.redirect_stdout(output):
+                receiver_uploader.main()
+        finally:
+            origin.shutdown()
+            origin.server_close()
+        self.assertEqual(len(batches), 3)
+        self.assertEqual(len(set(batches)), 1)
+        self.assertNotIn("permission ended", output.getvalue())
         db = sqlite3.connect(queue)
         try:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 0)

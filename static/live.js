@@ -18,7 +18,11 @@ window.pollMonitor = async id => {
 window.updateAdmin = admin => {
   $("adminLocked").hidden = admin; $("adminTools").hidden = !admin;
   $("adminLogin").textContent = admin ? "Admin account" : "Admin Login";
-  if (!admin && serialInput?.shared) {
+  $("liveTab").hidden = !admin;
+  if (admin) return;
+  if (sourceMode === "user") $("followTab").click();
+  stopDemo();
+  if (serialInput) {
     error("Admin session ended. USB publishing has stopped; log in again to reconnect.");
     serialInput.stop(false);
   }

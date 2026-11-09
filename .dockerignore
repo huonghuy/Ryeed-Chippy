@@ -1,0 +1,7 @@
+# Allow-list matching the Dockerfile's COPY lines, so .env, data/ and .git never enter the build context.
+*
+!app.py
+!mission.py
+!shared_feed.py
+!web_server.py
+!static

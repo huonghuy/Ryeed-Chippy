@@ -204,11 +204,14 @@ async function loadReplay(id) {
       all.push(...batch); after = batch.at(-1).id;
     }
     if (!all.length) throw new Error("The imported session contains no packets.");
-    followingLive = false; session = id; replayMode = true; flightPackets = all; replayIndex = 0;
-    $("replayControls").hidden = false; $("replaySeek").max = String(all.length - 1);
-    sourceTab("upload"); showReplay(0);
+    startReplay(id, all);
   } catch (e) { error(e.message); }
   finally { switching = false; await poll(); }
+}
+function startReplay(id, all) {
+  followingLive = false; session = id; replayMode = true; flightPackets = all; replayIndex = 0;
+  $("replayControls").hidden = false; $("replaySeek").max = String(all.length - 1);
+  sourceTab("upload"); showReplay(0);
 }
 function replayLabel() {
   $("replayPlay").textContent = replayPlaying ? "Pause Ⅱ" : "Play ▶";
@@ -229,10 +232,9 @@ $("importCsv").onclick = async () => {
   if (file.size > 8 * 1024 * 1024) return error("Choose a CSV smaller than 8 MB.");
   $("importCsv").disabled = true; error("");
   try {
-    followingLive = false;
-    const result = await api("/api/import", {name: file.name, csv: await file.text()});
-    $("uploadHelp").textContent = `${file.name} · ${result.count} rows loaded. Press Play or Show full flight.`;
-    await loadReplay(result.session);
+    const all = LocalFiles.parseFlightCsv(await file.text());
+    $("uploadHelp").textContent = `${file.name} · ${all.length} rows loaded in this browser. Press Play or Show full flight.`;
+    window.resetMonitor?.(); startReplay("", all); await poll();
   } catch (e) { error(e.message); }
   finally { $("importCsv").disabled = false; }
 };

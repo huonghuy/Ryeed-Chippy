@@ -1,0 +1,50 @@
+# CHIPPY ground station. Start with: docker compose pull && docker compose up -d
+# Then open http://localhost:8765/ and change the default admin password (bpp).
+# Optional settings below come from your shell or a .env file next to this one.
+
+services:
+  chippy:
+    # `:main` tracks the main branch. `:latest` only exists once a v* release
+    # tag has been pushed.
+    image: ghcr.io/huonghuy/ryeed-chippy:main
+    # Swap to this line once the rzaman00 repository is publishing:
+    #image: ghcr.io/rzaman00/ryeed-chippy:main
+    # To build locally instead of pulling, comment out `image:` above and
+    # uncomment these two lines:
+    #build:
+    #  context: .
+    container_name: chippy
+    restart: unless-stopped
+
+    ports:
+      # Loopback only because the default admin password is public. Keep this
+      # behind a reverse proxy; for direct LAN access use "8765:8765" and set
+      # CHIPPY_PUBLIC_URL, after changing the password.
+      - "127.0.0.1:8765:8765"
+
+    # app.py rejects unknown Host headers. Set CHIPPY_PUBLIC_URL to the exact
+    # origin browsers use (https://chippy.example.com, http://192.168.1.50:8765),
+    # which is also required if you change the host port above.
+    command: ["--public-url", "${CHIPPY_PUBLIC_URL:-}"]
+
+    environment:
+      # Passed through only if set. First start only; otherwise the password is bpp.
+      - CHIPPY_INITIAL_PASSWORD
+
+    volumes:
+      # SQLite database and saved password hash.
+      - chippy-data:/opt/chippy/data
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/state', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  chippy-data:

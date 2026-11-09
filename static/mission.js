@@ -9,7 +9,7 @@ const mission = window.missionMap = {
     this.configBusy = true; this.lastConfigPoll = Date.now();
     const scope = $("overlayScope").value;
     try {
-      const config = await api(`/api/map-config?scope=${scope}`);
+      const config = scope === "private" ? this.privateConfig() : await api("/api/map-config");
       if (scope !== $("overlayScope").value) return;
       if (this.scope !== scope || config.revision !== this.config.revision || force) {
         this.scope = scope; this.config = config; this.draw2d(); this.render3d(true); this.fillForm();
@@ -17,11 +17,25 @@ const mission = window.missionMap = {
     } catch (e) { error(`Map overlays could not load: ${e.message}`); }
     finally { this.configBusy = false; }
   },
+  privateConfig() {
+    if (!this.localOverlays) {
+      try { this.localOverlays = JSON.parse(localStorage.getItem("chippy-private-overlays")); } catch {}
+      this.localOverlays ||= {revision: "", geofence: null, kml: null};
+    }
+    return this.localOverlays;
+  },
+  savePrivate(body) {
+    this.localOverlays = LocalFiles.applyOverlay(this.privateConfig(), body);
+    // A full or blocked localStorage only costs persistence across page reloads.
+    try { localStorage.setItem("chippy-private-overlays", JSON.stringify(this.localOverlays)); this.storageError = ""; }
+    catch { this.storageError = "Overlay is shown, but this browser could not save it. It will be gone after a refresh."; }
+    return this.localOverlays;
+  },
   async save(body, shared) {
-    const config = await api("/api/map-config", {...body, shared});
+    const config = shared ? await api("/api/map-config", body) : this.savePrivate(body);
     $("overlayScope").value = shared ? "shared" : "private";
     this.scope = $("overlayScope").value; this.config = config; this.lastConfigPoll = 0;
-    this.draw2d(); this.render3d(true); this.fillForm(); error("");
+    this.draw2d(); this.render3d(true); this.fillForm(); error(shared ? "" : this.storageError);
   },
   fillForm() {
     const fence = this.config.geofence;
@@ -162,7 +176,7 @@ async function saveFence(shared) {
     await mission.save({action:"geofence",corners,warning_m:Number($("fenceWarning").value)},shared);
     $("choppiesToggle").checked=true;mission.draw2d();mission.render3d(true);
     if(map)map.fitBounds(corners,{padding:[25,25]});
-    $("geofenceHelp").textContent=`Geofence ${shared ? "published to live viewers" : "saved to your private view"}. Monitoring only; cutdown remains onboard.`;
+    $("geofenceHelp").textContent=`Geofence ${shared ? "published to live viewers" : "saved in this browser only"}. Monitoring only; cutdown remains onboard.`;
   } catch(e){error(e.message);}
 }
 $("geofenceForm").onsubmit=e=>{e.preventDefault();saveFence(false);}; $("publishFence").onclick=()=>saveFence(true);

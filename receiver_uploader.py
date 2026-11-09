@@ -1,6 +1,7 @@
 """Forward a USB receiver to a CHIPPY server, keeping an on-disk retry queue."""
 import argparse
 import getpass
+from http.client import HTTPException
 import http.cookiejar
 import json
 from pathlib import Path
@@ -16,6 +17,11 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent / "vendor"))
 import serial
 from serial.tools import list_ports
+
+
+def permission_ended(exc):
+    # Only the app answers in JSON; a 403 or 404 from Cloudflare or the tunnel is worth retrying.
+    return exc.code in (401, 403, 404, 409) and exc.headers.get_content_type() == "application/json"
 
 
 def main():
@@ -40,7 +46,8 @@ def main():
     opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def post(path, body):
-        request = Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        # Cloudflare bans the default Python-urllib User-Agent (error 1010).
+        request = Request(base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "User-Agent": "CHIPPY-Uploader/1.0"})
         with opener.open(request, timeout=15) as response:
             return json.load(response)
 
@@ -75,13 +82,13 @@ def main():
                 print(f"Uploaded {len(rows)} serial lines ({result.get('invalid', 0)} malformed telemetry lines).", flush=True)
                 pending = None
             except HTTPError as exc:
-                if exc.code in (401, 403, 404, 409):
+                if permission_ended(exc):
                     print("Publishing permission ended or another admin replaced the feed. Capture is stopping; queued lines remain on disk. Restart and log in again.", flush=True)
                     fatal.set()
                     return
                 print(f"Server returned {exc.code}; data remains queued. Retrying…", flush=True)
                 stopping.wait(3)
-            except (URLError, TimeoutError, OSError, ValueError) as exc:
+            except (URLError, TimeoutError, OSError, ValueError, HTTPException) as exc:
                 print(f"Upload interrupted; data remains queued. Retrying… {exc}", flush=True)
                 stopping.wait(3)
 

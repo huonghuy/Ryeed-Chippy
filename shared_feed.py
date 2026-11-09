@@ -67,7 +67,8 @@ class Access:
             now = time.monotonic()
             self.failures = {k: v for k, v in self.failures.items() if v[1] > now}
             attempts, until = self.failures.get(address, (0, now + 60))
-            if attempts >= 5:
+            # Per visitor, so one visitor can't lock out the admin; the total bounds guessing if addresses are spoofed.
+            if attempts >= 5 or sum(v[0] for v in self.failures.values()) >= 50:
                 raise FeedError("Too many login attempts. Wait one minute and try again.", 429)
             if not self.check_password(password):
                 self.failures[address] = (attempts + 1, until)

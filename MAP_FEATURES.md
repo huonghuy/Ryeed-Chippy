@@ -68,11 +68,11 @@ Absolute altitude is plotted in meters. clampToGround uses the globe/reference
 surface; relativeToGround is relative to that same reference surface, without
 detailed terrain or geoid correction. The 2D map shows the horizontal footprint.
 
-Private and shared overlays are saved separately in the server database and
-survive restarts. Loading a KML does not replace the existing geofence. Clearing
-a KML does not clear the geofence, and vice versa. Only admins can modify shared
-overlays. Private ownership uses the existing browser cookie; clearing cookies
-loses private access, though admins can recover the records on the server.
+Shared overlays are saved in the server database and survive restarts; only admins
+can change them. Private overlays are parsed and stored in the browser and never
+reach the server, so clearing browser data removes them and they do not follow you
+to another computer. Loading a KML does not replace the existing geofence. Clearing
+a KML does not clear the geofence, and vice versa.
 
 ## Airspace modes
 

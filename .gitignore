@@ -1,3 +1,6 @@
 __pycache__/
 data/
 .venv/
+.env
+/.codegraph
+.DS_Store

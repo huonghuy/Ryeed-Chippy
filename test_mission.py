@@ -103,12 +103,11 @@ class MissionHTTPTests(unittest.TestCase):
     assert_status=support.SharedFeedTests.assert_status
     login=support.SharedFeedTests.login
 
-    def test_private_overlay_isolation_and_admin_only_shared_publish(self):
+    def test_server_overlays_are_admin_only_and_shared(self):
         body={'action':'geofence','corners':[[38,-77],[38,-76],[39,-77],[39,-76]],'shared':False}
-        self.request(self.publisher,'/api/map-config',body)
-        self.assertIsNotNone(self.request(self.publisher,'/api/map-config?scope=private')['geofence'])
-        self.assertIsNone(self.request(self.viewer,'/api/map-config?scope=private')['geofence'])
+        self.assert_status(401,self.viewer,'/api/map-config',body)
         self.assert_status(401,self.viewer,'/api/map-config',{**body,'shared':True})
+        self.assertIsNone(self.request(self.viewer,'/api/map-config')['geofence'])
         self.login()
         self.request(self.publisher,'/api/map-config',{**body,'shared':True})
         self.assertIsNotNone(self.request(self.viewer,'/api/map-config')['geofence'])

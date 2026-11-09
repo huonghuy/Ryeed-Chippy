@@ -75,7 +75,7 @@ app can hold the USB port at a time.
   the shared-session selection persist.
 - Publishing a CSV replaces the live feed with a recorded flight.
 - Set storage/proxy request limits for your host, monitor disk use, and maintain
-  backups. Private user inputs also consume server storage.
+  backups. Only logged-in admins can add data to the server.
 - There is no email recovery. Retain the password/database; recovery from a
   forgotten password requires server administration.
 
